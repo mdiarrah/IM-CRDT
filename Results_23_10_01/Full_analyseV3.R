@@ -15,12 +15,17 @@ library(conflicted)
 # library(dplyr)
 library(ggplot2)
 library(tidyverse)
+# install.packages(plotmath)
+library(grDevices)
 
 conflict_prefer("filter", "dplyr")
 conflict_prefer("lag", "dplyr")
 
+
+
+##############################- Retrieving data so it can be used -##############################
+
 # IM-CRDT
-# 2 Peers
 
 data_Frame_IM_CRDT = data.frame(CID=character(0),maxlatency=numeric(0),mean_latency=numeric(0),mean_time_retrieve=numeric(0),mean_time_compute=numeric(0),time_add_IPFS=numeric(0),mean_time_pubsub=numeric(0),numUpdates=numeric(0),numberPeers=numeric(0),numberPeerUpdating=numeric(0),System=character(0))
 
@@ -49,6 +54,21 @@ for (nb_peers in c(2, 5, 10, 20, 50) )
 
 
 write.table(data_Frame_IM_CRDT, "DATA_Experience/totalDATAFRAME_IM-CRDT.csv")
+
+
+sizes_IM_CRDT=read.csv("DATA_Experience/size_IM_CRDT.csv")
+sizes_IM_CRDT <- sizes_IM_CRDT %>%
+  add_column(System = "IM-CRDT")
+
+sizes_IPFS_ALONE=read.csv("DATA_Experience/size_IPFS.csv")
+sizes_IPFS_ALONE <- sizes_IPFS_ALONE %>%
+  add_column(System = "IPFS")
+
+
+
+
+
+# IPFS
 
 data_Frame_IPFS_Alone = data.frame(CID=character(0),maxlatency=numeric(0),mean_latency=numeric(0),mean_timeRetrieve=numeric(0),mean_timeSend=numeric(0),mean_time_pubsub=numeric(0),numUpdates=numeric(0),numberPeers=numeric(0),numberPeerUpdating=numeric(0),System=character(0))
 
@@ -100,13 +120,48 @@ p <- data %>%
     theme(text = element_text(size = 20)) +
     geom_boxplot(outlier.shape = NA) +
     facet_wrap(~numUpdates) +
+    scale_fill_discrete(labels = c("IM-CRDT", "IPFS")) +
     xlab("Number of replicas")+
     ylab("Maximum latency (ms)") +
-    scale_y_continuous(limits = c(100,600)) 
+    scale_y_continuous(limits = c(0,600)) 
 
 #     geom_boxplot(outlier.shape = NA, fill=System) 
 
 plot(p)
+
+for (nbp in c(2,5,10,20,50))
+{
+  for (nbu in c(10,100,1000))
+  {
+    data_IM_CRDT = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 1 & numberPeers == nbp & numUpdates == nbu)
+
+    data_IPFS_Alone = filter(data_Frame_IPFS_Alone, System == "IPFS Alone"  & numberPeerUpdating == 1 & numberPeers == nbp & numUpdates == nbu)
+
+
+    print(paste(nbp, nbu, median(data_IM_CRDT$"maxlatency") / median(data_IPFS_Alone$"maxlatency") ))
+    print(paste(median(data_IM_CRDT$"maxlatency"),median(data_IPFS_Alone$"maxlatency") ))
+  }
+}
+print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-10UPDATES-50Peers-1 VS 20 updater=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=")
+data_IM_CRDT1 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 1 & numberPeers == 50 & numUpdates == 10)
+data_IM_CRDT2 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 20 & numberPeers == 50 & numUpdates == 10)
+print(paste(nbp, nbu,  median(data_IM_CRDT1$"maxlatency") /median(data_IM_CRDT2$"maxlatency")  ))
+print(paste(median(data_IM_CRDT1$"maxlatency"),median(data_IM_CRDT2$"maxlatency") ))
+
+print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-100/1000UPDATES-50Peers-1 VS 20 updater=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=")
+
+print("100Updates")
+data_IM_CRDT1 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 1 & numberPeers == 50 & numUpdates == 100)
+data_IM_CRDT2 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 20 & numberPeers == 50 & numUpdates == 100)
+print(paste(nbp, nbu, median(data_IM_CRDT2$"maxlatency") / median(data_IM_CRDT1$"maxlatency")  ))
+print(paste(median(data_IM_CRDT1$"maxlatency"),median(data_IM_CRDT2$"maxlatency") ))
+
+print("1000Updates")
+data_IM_CRDT1 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 1 & numberPeers == 50 & numUpdates == 1000)
+data_IM_CRDT2 = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 20 & numberPeers == 50 & numUpdates == 1000)
+print(paste(nbp, nbu,  median(data_IM_CRDT2$"maxlatency")  / median(data_IM_CRDT1$"maxlatency")  ))
+print(paste(median(data_IM_CRDT1$"maxlatency"),median(data_IM_CRDT2$"maxlatency") ))
+
 
 # ggplot(data_IPFS_Alone, aes(x=numberPeers, y=maxlatency)) + 
 #     geom_boxplot(outlier.shape = NA, fill=System) 
@@ -117,23 +172,24 @@ plot(p)
 ##############################- Test of scalability of IM-CRDT -##############################
 
 
-
 # grouped boxplot
 data_Frame_IM_CRDT$numberPeers = as.character(data_Frame_IM_CRDT$numberPeers)
 data_Frame_IM_CRDT$numberPeerUpdating = as.character(data_Frame_IM_CRDT$numberPeerUpdating)
 
+# pdf("test.pdf",width=10, height=6)
+
 p <- data_Frame_IM_CRDT %>%
   mutate(numberPeerUpdating = fct_relevel(numberPeerUpdating, "1" , "2", "5", "10", "20")) %>%
   mutate(numberPeers = fct_relevel(numberPeers, "2" , "5", "10", "20", "50")) %>%
-  ggplot( aes(x=numberPeerUpdating, y=maxlatency, fill=numberPeers)) +
-    theme(text = element_text(size = 20)) +
+  ggplot( aes(x=numberPeerUpdating, y=maxlatency / 1000, fill=numberPeers)) +
+    theme( text = element_text(size =27)) +
     geom_boxplot(outlier.shape = NA) +
     facet_wrap(~numUpdates) +
     labs(fill = "replicas") + 
     xlab("Number of peers updating")+
-    ylab("Maximum latency (ms)") +
-    scale_y_log10()
-
+    ylab("Maximum latency (s) log scale") +
+    scale_y_log10(labels=function(n){format(n, scientific = FALSE)}) 
+    # theme()
 
 plot(p)
 
@@ -172,14 +228,19 @@ print(CSVFrameCRDT_IPFS_20$"mean_time_pubsub")
 
 
 ggplot(data, aes(fill=condition, y=value, x=specie)) + 
-    theme(text = element_text(size = 20)) +
+    theme(text = element_text(size = 30)) +
     scale_x_continuous(,breaks = seq(1, 5, 1), labels = c(1,2,5,10,20))+
     xlab("Number of peers updating")+
-    ylab("time (ms)") +
+    ylab("time (ms) log scale") +
     scale_fill_discrete(labels = c("Compute", "Pubsub", "Retrieve", "Add IPFS")) +
     labs(fill = "Step") + 
     geom_bar(position="stack", stat="identity") + 
-    scale_y_log10()
+    scale_y_log10(labels=function(n){format(n, scientific = FALSE,big.mark=",")})
+
+
+
+
+##############################- evolution of Compute time specifically -##############################
 
 
 specieCompute <- c(rep(1 , 1) , rep(2 , 1) , rep(3 , 1) , rep(4 , 1), rep(5, 1) )
@@ -190,14 +251,16 @@ valueCompute = abs(c(mean(CSVFrameCRDT_IPFS$"mean_time_compute") ,
     mean(CSVFrameCRDT_IPFS_10$"mean_time_compute"),
     mean(CSVFrameCRDT_IPFS_20$"mean_time_compute")))
 dataCompute<- data.frame(specieCompute,conditionCompute,valueCompute)
+print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-Compute time values=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=")
+
 print(dataCompute)
 
 
-ggplot(dataCompute, aes(y=valueCompute, x=specieCompute)) + 
-    theme(text = element_text(size = 20)) +
+ggplot(dataCompute, aes(y=valueCompute / 1000, x=specieCompute)) + 
+    theme(text = element_text(size = 30)) +
     scale_x_continuous(,breaks = seq(1, 5, 1), labels = c(1,2,5,10,20))+
     xlab("Number of peers updating")+
-    ylab("Compute time (ns)") +
+    ylab("Compute time (micro seconds)") +
     geom_line() +
     geom_point()
 
@@ -237,7 +300,8 @@ p <- data %>%
     facet_wrap(~numUpdates) +
     xlab("Number of replicas")+
     ylab("Mean Time to retrieve (ms)") +
-    scale_y_continuous(limits = c(30,275)) 
+    scale_fill_discrete(labels = c("IM-CRDT", "IPFS")) +
+    scale_y_continuous(limits = c(0,275)) 
 
 #     geom_boxplot(outlier.shape = NA, fill=System) 
 
@@ -245,6 +309,51 @@ plot(p)
 
 
 
+
+##############################- Size comparison between IM-CRDT and IPFS -##############################
+
+data=rbind(sizes_IM_CRDT,sizes_IPFS_ALONE)
+
+TOTAL_size_IM_CRDT=0 
+TOTAL_size_IPFS=0 
+mean_IM_CRDT=0
+mean_IPFS=0
+
+for (k in 1:nrow(sizes_IM_CRDT)) {
+  TOTAL_size_IM_CRDT=TOTAL_size_IM_CRDT+sizes_IM_CRDT$"size"[k]
+}
+
+for (k in 1:nrow(sizes_IPFS_ALONE)) {
+  if (sizes_IPFS_ALONE$"size"[k] > TOTAL_size_IPFS){
+    TOTAL_size_IPFS=sizes_IPFS_ALONE$"size"[k]
+  }
+  mean_IPFS=mean_IPFS+sizes_IPFS_ALONE$"size"[k]
+}
+mean_IM_CRDT = TOTAL_size_IM_CRDT / nrow(sizes_IM_CRDT)
+mean_IPFS=mean_IPFS / nrow(sizes_IPFS_ALONE)
+
+TOTAL_size_IM_CRDT=TOTAL_size_IM_CRDT+1083988 # add initial size which isn't counted before so it doesn't impact the real mean size
+                                              # Not needed for IPFS because sent sizes only grows, so it doesn't disapear
+
+
+values=c(TOTAL_size_IM_CRDT,mean_IM_CRDT,TOTAL_size_IPFS,mean_IPFS)
+type=c("Total Size","Update size","Total Size","Update size")
+system=c("IM-CRDT","IM-CRDT","IPFS","IPFS")
+data=data.frame(values,type,system)
+
+print(data)
+
+p <- data %>%
+  ggplot( aes(x=system, y=values, fill=system)) +
+    theme(text = element_text(size = 20)) +
+    geom_bar(stat="identity") +
+    facet_wrap(~type) +
+    xlab("System")+
+    ylab("Size (byte) log scale") +
+    # scale_fill_discrete(labels = c("IM-CRDT", "IPFS")) +
+    scale_y_log10() 
+
+plot(p)
 
 
 # data_IM_CRDT = filter(data_Frame_IM_CRDT, System == "IM-CRDT"  & numberPeerUpdating == 1)
