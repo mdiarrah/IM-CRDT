@@ -192,12 +192,12 @@ func (self *StrSet) CheckUpdate() []string {
 				}
 				received = append(received, ccid.String())
 
-				newFile, err := IpfsLink.GetIPFS(self.sys, ccid.Bytes())
+				newFiles, err := IpfsLink.GetIPFS(self.sys, append(make([][]byte, 0), ccid.Bytes()))
 				if err != nil {
 					panic(fmt.Errorf("issue retrieving the IPFS Node :%s", err))
 				}
 				newNodeFile := self.NextFileName()
-				FI.WriteTo(newFile, newNodeFile)
+				FI.WriteTo(newFiles[0], newNodeFile)
 
 				fileNotFinished := true
 				for fileNotFinished {

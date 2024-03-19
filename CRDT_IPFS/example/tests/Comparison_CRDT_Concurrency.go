@@ -3,52 +3,49 @@ package tests
 import (
 	"IPFS_CRDT/example/Set"
 	IpfsLink "IPFS_CRDT/ipfsLink"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 	// "github.com/beevik/ntp"
 )
 
 func GetTime(ntpServ string) int {
-	// // x := "ssh root@" + ntpServ + " sh -c 'date +%s%N | cut -b1-13' "
-	// // cmd := exec.Command(x, "./")
-	// // out, err := cmd.Output()
-	// // if err != nil {
-	// // 	// if there was any error, print it here
-	// // 	fmt.Println("could not run command: ", err)
-	// // }
-
-	// // ti, err := strconv.Atoi(string(out))
-	// ti, err := ntp.Time(ntpServ)
-	// if err != nil {
-	// 	// n := 0
-	// 	panic(fmt.Errorf("Failed To get time : %s", err))
-	// 	// ti = time.Time{0}
-	// 	// err = nil
-	// 	// for n < 100 && err != nil { // try over 1 s to get ntp time
-	// 	// 	time.Sleep(10 * time.Millisecond)
-	// 	// 	ti, err = ntp.Time("2.fr.pool.ntp.org")
-	// 	// 	n += 1
-	// 	// }
-	// 	// if err != nil { // if ntp is impossible to
-	// 	// 	ti = time.Now()
-
-	// 	// 	f, _ := os.OpenFile(peername+"/error.csv", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0755)
-	// 	// 	f.WriteString("ERROR NTP !!!!")
-	// 	// 	f.Close()
-	// 	// }
-	// }
 	return int(time.Now().UnixMilli())
 }
 
+func getSema(sema *semaphore.Weighted, ctx context.Context) {
+	t := time.Now()
+	err := sema.Acquire(ctx, 1)
+	for err != nil && time.Since(t) < 10*time.Second {
+		time.Sleep(10 * time.Microsecond)
+		err = sema.Acquire(ctx, 1)
+	}
+	if err != nil {
+		panic(fmt.Errorf("Semaphore of READ/WRITE file locked !!!!\n Cannot acquire it\n"))
+	}
+}
+
+func returnSema(sema *semaphore.Weighted) {
+	sema.Release(1)
+}
+
 // \/ BOOTSTRAP PEER IS THIS ONE \/
-func Peer1Concu(peername string, nbUpdates int, ntpServ string) {
-	sys1, err := IpfsLink.InitNode(peername, "")
+func Peer1Concu(peername string, nbUpdates int, ntpServ string, encode string, measurement bool) {
+
+	fileRead, err := os.OpenFile(peername+"/time/FileRead.log", os.O_CREATE|os.O_WRONLY, 0755)
+	file, err := os.OpenFile(peername+"/time/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
+	sema := semaphore.NewWeighted(1)
+
+	sys1, err := IpfsLink.InitNode(peername, "", make([]byte, 0))
 	if err != nil {
 		panic(fmt.Errorf("Failed To instanciate IFPS & LibP2P clients : %s", err))
 	}
+
 	str := ""
 	for i := range sys1.Cr.Host.Addrs() {
 		s := sys1.Cr.Host.Addrs()[i].String()
@@ -57,84 +54,94 @@ func Peer1Concu(peername string, nbUpdates int, ntpServ string) {
 	if _, err := os.Stat("./ID2"); !errors.Is(err, os.ErrNotExist) {
 		os.Remove("./ID2")
 	}
+
 	WriteFile("./ID2", []byte(str))
+
+	bytesIPFS_Node, err := sys1.IpfsNode.Peerstore.PeerInfo(sys1.IpfsNode.Identity).MarshalJSON()
+	if err != nil {
+		panic(fmt.Errorf("Failed To Marshall IFPS Identity & LibP2P clients : %s", err))
+	}
+	if _, err := os.Stat("./IDBootstrapIPFS"); !errors.Is(err, os.ErrNotExist) {
+		os.Remove("./IDBootstrapIPFS")
+	}
+	WriteFile("./IDBootstrapIPFS", bytesIPFS_Node)
+
 	time.Sleep(20 * time.Second)
 
-	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, "")
+	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, "", encode, measurement)
 
-	file, err := os.OpenFile(peername+"/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
-	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS\n")
-
+	fileRead.WriteString("Taking Sema to write headers ... ")
+	getSema(sema, sys1.Ctx)
+	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS,time_encrypt,time_decrypt,time_Retreive_Whole_Batch\n")
+	returnSema(sema)
+	fileRead.WriteString("Header just written\n")
 	if err != nil {
 		panic(fmt.Errorf("Error openning file file\nerror : %s", err))
 	}
 	fmt.Println("Starting the Set, sleeping 30s to wait others")
 
 	ti := time.Now()
-	// Sleep 30s before emiting updates to wait others
+	// Sleep 300s before emiting updates to wait others
 	for time.Since(ti) < 300*time.Second {
 		time.Sleep(30 * time.Microsecond)
 
 		strList := SetCrdt1.CheckUpdate()
 		if len(strList) > 0 {
+			fileRead.WriteString("Just Received some updates\n")
 			t := strconv.Itoa(GetTime(ntpServ))
 
 			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
+				getSema(sema, sys1.Ctx)
+				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].RetrievalAlone) + "," + strconv.Itoa(strList[j].CalculTime) + ",0,0," + strconv.Itoa(strList[j].Time_decrypt) + "," + strconv.Itoa(strList[j].RetrievalTotal) + "\n")
+				returnSema(sema)
+				fileRead.WriteString("writing 1 line\n")
 			}
+			fileRead.WriteString("all update received are handled\n= = = = = = =\n")
 		}
 	}
+
 	fmt.Printf("Starting the Set, updating %d times\n", nbUpdates)
 	ti = time.Now()
-	k := 0
-	for k < nbUpdates {
-		time.Sleep(30 * time.Microsecond)
-		strList := SetCrdt1.CheckUpdate()
-		t := strconv.Itoa(GetTime(ntpServ))
-		if len(strList) > 0 {
 
-			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
-			}
-		}
-		if time.Since(ti) >= time.Millisecond*1000 {
-			t := strconv.Itoa(GetTime(ntpServ))
-			time_start := time.Now()
-			encodedCid := SetCrdt1.Add(sys1.Cr.Id + "VALUE ADDED" + strconv.Itoa(k))
-			file.WriteString(encodedCid + "," + t + "," + "0,0," + strconv.Itoa(int(time.Since(time_start).Nanoseconds())) + "\n")
-			k++
-			ti = time.Now()
-		}
+	// Send updates concurrently every 1 seconds
+	go sendUpdates(nbUpdates, &SetCrdt1, ntpServ, file, sys1.Cr.Id, sema)
 
-	}
-	if err = file.Close(); err != nil {
-		panic(fmt.Errorf("Error closing file\nerror : %s", err))
-	}
+	//regularly scan files if there is any new received updates
 	for {
 		time.Sleep(30 * time.Microsecond)
 
 		strList := SetCrdt1.CheckUpdate()
 		if len(strList) > 0 {
+			fileRead.WriteString("Just Received some updates\n")
 			t := strconv.Itoa(GetTime(ntpServ))
 
 			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
+				getSema(sema, sys1.Ctx)
+				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].RetrievalAlone) + "," + strconv.Itoa(strList[j].CalculTime) + ",0,0," + strconv.Itoa(strList[j].Time_decrypt) + "," + strconv.Itoa(strList[j].RetrievalTotal) + "\n")
+				returnSema(sema)
+				fileRead.WriteString("writing 1 line\n")
 			}
+			fileRead.WriteString("all update received are handled\n= = = = = = =\n")
 		}
 		// x := SetCrdt1.Lookup()
 		// fmt.Println("New Value of the Set:", x.Lookup())
 	}
 }
 
-func Peer2Concu(peername string, bootStrapPeer string, nbUpdates int, ntpServ string) {
-	sys1, err := IpfsLink.InitNode(peername, bootStrapPeer)
+func Peer2Concu(peername string, bootStrapPeer string, IPFSbootStrapPeer string, nbUpdates int, ntpServ string, encode string, measurement bool) {
+	IPFSbootstrapBytes, err := os.ReadFile(IPFSbootStrapPeer)
+	if err != nil {
+		panic(fmt.Errorf("Failed To Read IFPS bootstrap peer multiaddr : %s", err))
+	}
+	sys1, err := IpfsLink.InitNode(peername, bootStrapPeer, IPFSbootstrapBytes)
 	if err != nil {
 		panic(fmt.Errorf("Failed To instanciate IFPS & LibP2P clients : %s", err))
 	}
+	time.Sleep(10 * time.Second)
 
-	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, bootStrapPeer)
-	file, err := os.OpenFile(peername+"/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
-	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS\n")
+	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, bootStrapPeer, encode, measurement)
+	file, err := os.OpenFile(peername+"/time/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
+	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS,time_encrypt,time_decrypt,time_Retreive_Whole_Batch\n")
 	if err != nil {
 		panic(fmt.Errorf("Error openning file file\nerror : %s", err))
 	}
@@ -147,41 +154,60 @@ func Peer2Concu(peername string, bootStrapPeer string, nbUpdates int, ntpServ st
 			t := strconv.Itoa(GetTime(ntpServ))
 
 			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
+				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].RetrievalAlone) + "," + strconv.Itoa(strList[j].CalculTime) + ",0,0," + strconv.Itoa(strList[j].Time_decrypt) + "," + strconv.Itoa(strList[j].RetrievalTotal) + "\n")
 			}
 		}
 
 	}
 }
 
-func Peer2ConcuUpdate(peername string, bootStrapPeer string, nbUpdates int, ntpServ string) {
-	sys1, err := IpfsLink.InitNode(peername, bootStrapPeer)
+func Peer2ConcuUpdate(peername string, bootStrapPeer string, IPFSbootStrapPeer string, nbUpdates int, ntpServ string, encode string, measurement bool) {
+	sema := semaphore.NewWeighted(1)
+	IPFSbootstrapBytes, err := os.ReadFile(IPFSbootStrapPeer)
+	if err != nil {
+		panic(fmt.Errorf("Failed To Read IFPS bootstrap peer multiaddr : %s", err))
+	}
+	sys1, err := IpfsLink.InitNode(peername, bootStrapPeer, IPFSbootstrapBytes)
 	if err != nil {
 		panic(fmt.Errorf("Failed To instanciate IFPS & LibP2P clients : %s", err))
 	}
-
-	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, bootStrapPeer)
-	file, err := os.OpenFile(peername+"/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
-	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS\n")
+	time.Sleep(10 * time.Second)
+	SetCrdt1 := Set.Create_CRDTSetOpBasedDag(sys1, peername, bootStrapPeer, encode, measurement)
+	file, err := os.OpenFile(peername+"/time/time.csv", os.O_CREATE|os.O_WRONLY, 0755)
+	fileRead, err := os.OpenFile(peername+"/time/FileRead.log", os.O_CREATE|os.O_WRONLY, 0755)
+	fileRead.WriteString("Taking Sema to write headers ... ")
+	getSema(sema, sys1.Ctx)
+	file.WriteString("CID,time,time_retrieve,time_compute,time_add_IPFS,time_encrypt,time_decrypt,time_Retreive_Whole_Batch\n")
+	returnSema(sema)
+	fileRead.WriteString("Header just written\n")
 	if err != nil {
 		panic(fmt.Errorf("Error openning file file\nerror : %s", err))
 	}
 
-	// Sleep 30s before emiting updates to wait others
+	// Sleep 300s before emiting updates to wait others
 	ti := time.Now()
 	for time.Since(ti) < 300*time.Second {
 		time.Sleep(30 * time.Microsecond)
 
 		strList := SetCrdt1.CheckUpdate()
 		if len(strList) > 0 {
+			fileRead.WriteString("Just Received some updates\n")
 			t := strconv.Itoa(GetTime(ntpServ))
 
 			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
+				getSema(sema, sys1.Ctx)
+				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].RetrievalAlone) + "," + strconv.Itoa(strList[j].CalculTime) + ",0,0," + strconv.Itoa(strList[j].Time_decrypt) + "," + strconv.Itoa(strList[j].RetrievalTotal) + "\n")
+				returnSema(sema)
+				fileRead.WriteString("writing 1 line\n")
 			}
+			fileRead.WriteString("all update received are handled\n= = = = = = =\n")
 		}
 	}
 
+	// Send updates concurrently every 1 seconds
+	go sendUpdates(nbUpdates, &SetCrdt1, ntpServ, file, sys1.Cr.Id, sema)
+
+	//regularly scan files if there is any new received updates
 	fmt.Printf("Starting the Set, updating %d times\n", nbUpdates)
 	ti = time.Now()
 	k := 0
@@ -190,41 +216,46 @@ func Peer2ConcuUpdate(peername string, bootStrapPeer string, nbUpdates int, ntpS
 
 		strList := SetCrdt1.CheckUpdate()
 		if len(strList) > 0 {
+			fileRead.WriteString("Just Received some updates\n")
 			t := strconv.Itoa(GetTime(ntpServ))
-
 			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
+				getSema(sema, sys1.Ctx)
+				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].RetrievalAlone) + "," + strconv.Itoa(strList[j].CalculTime) + ",0,0," + strconv.Itoa(strList[j].Time_decrypt) + "," + strconv.Itoa(strList[j].RetrievalTotal) + "\n")
+				returnSema(sema)
+				fileRead.WriteString("writing 1 line\n")
 			}
+			fileRead.WriteString("all update received are handled\n= = = = = = =\n")
 		}
+	}
+	if err := file.Close(); err != nil {
+		panic(fmt.Errorf("Error closing file\nerror : %s", err))
+	}
 
-		// x := SetCrdt1.Lookup()
-		// fmt.Println("New Value of the Set:", x.Lookup())
+}
+
+func sendUpdates(nbUpdates int, SetCrdt1 *Set.CRDTSetOpBasedDag, ntpServ string, file *os.File, netID string, sema *semaphore.Weighted) {
+	fileWrite, _ := os.OpenFile(SetCrdt1.GetCRDTManager().Nodes_storage_enplacement+"/time/FileWrite.log", os.O_CREATE|os.O_WRONLY, 0755)
+	fileWrite.WriteString(fmt.Sprintf("Starting the Set, updating %d times\n", nbUpdates))
+	ti := time.Now()
+	k := 0
+	for k < nbUpdates {
+		time.Sleep(30 * time.Microsecond)
 
 		if time.Since(ti) >= time.Millisecond*1000 {
-			time_start := time.Now()
-			encodedCid := SetCrdt1.Add(sys1.Cr.Id + "VALUE ADDED" + strconv.Itoa(k))
-			file.WriteString(encodedCid + "," + strconv.Itoa(GetTime(ntpServ)) + ",0,0," + strconv.Itoa(int(time.Since(time_start).Nanoseconds())) + "\n")
+			fileWrite.WriteString("updating the data\n")
+			encodedCid, times := SetCrdt1.Add(netID + "VALUE ADDED" + strconv.Itoa(k))
+			fileWrite.WriteString("updating the data - taking sema\n")
+			getSema(sema, context.Background())
+			fileWrite.WriteString("Semaphore tooken\n")
+			file.WriteString(encodedCid + "," + strconv.Itoa(GetTime(ntpServ)) + "," + "0,0," + strconv.Itoa(times.Time_add) + "," + strconv.Itoa(times.Time_encrypt) + ",0,0\n")
+			fileWrite.WriteString("returning Semaphore\n")
+			returnSema(sema)
+			fileWrite.WriteString("WRITE - 1 line added to time.csv\n")
 			k++
 			ti = time.Now()
 		}
 
 	}
-	if err = file.Close(); err != nil {
-		panic(fmt.Errorf("Error closing file\nerror : %s", err))
-	}
-	for {
-		time.Sleep(30 * time.Microsecond)
-
-		strList := SetCrdt1.CheckUpdate()
-		if len(strList) > 0 {
-			t := strconv.Itoa(GetTime(ntpServ))
-
-			for j := 0; j < len(strList); j++ {
-				file.WriteString(strList[j].Cid + "," + t + "," + strconv.Itoa(strList[j].IntegrityCheckTime) + "," + strconv.Itoa(strList[j].CalculTime) + ",0\n")
-			}
-		}
-
-		// x := SetCrdt1.Lookup()
-		// fmt.Println("New Value of the Set:", x.Lookup())
-	}
+	fileWrite.WriteString("WRITE - all updates are done\n")
+	fileWrite.Close()
 }

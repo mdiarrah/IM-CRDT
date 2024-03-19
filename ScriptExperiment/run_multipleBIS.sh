@@ -12,34 +12,34 @@ cat "$file_NODES" | cut -d'.' -f1 | tail -n "$(( $NumberNodes - 1 ))" > other
 head -n 1 "$file_NODES"| cut -d'.' -f1 > bootstrap
 
 ./Run_CI.sh go_trans.tar.gz $NumberNodes $NumberUpdates $nbpeersUpdating $file_NODES
-echo "waiting half a minute so everybody is connected"
-sleep 100s
-if [ $NumberUpdates -eq 10 ]
+echo "waiting Five minute so everybody is connected"
+sleep 300s
+if [ $NumberUpdates -le 10 ]
 then
-echo "sleep 150s"
-sleep 500s
+echo "letting the algorithm run for 70s"
+sleep $(($numberUpdates + 60))s
 fi
 if [ $NumberUpdates -eq 100 ]
 then
-echo "sleep 160s"
-sleep 160s
+echo "letting the algorithm run for 220s"
+sleep $(($numberUpdates  + 120))s
 fi
 if [ $NumberUpdates -eq 1000 ]
 then
-echo "sleep 1600s"
+echo "letting the algorithm run for 1200s"
 for percent in {1..100..10} 
 do
 echo $(( $percent ))"percent"
-sleep 17s
+sleep 120s
 done
 fi
 if [ $NumberUpdates -eq 10000 ]
 then
-echo "sleep 5600s - "$(date +"%T")
+echo "letting the algorithm run for 10200s - "$(date +"%T")
 for percent in {1..100..10} 
 do
 echo $(( $percent ))"percent"
-sleep 562s
+sleep 1020s
 done
 fi
 ./retrieveInfo.sh $NumberNodes $NumberUpdates

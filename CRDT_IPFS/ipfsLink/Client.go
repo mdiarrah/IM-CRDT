@@ -1,6 +1,7 @@
 package IpfsLink
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/multiformats/go-multiaddr"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -52,10 +54,20 @@ func (*CustomValidator) Select(key string, values [][]byte) (int, error) {
 func InitClient(name string, bootstrapPeer string) *Client {
 	ctx := context.Background()
 
-	host, err := libp2p.New()
+	key := "edd99a84bbdd5c9cfc06bcc039d219b1000885ecba26901c02e7c8792bfaaa70"
+	s := ""
+	s += fmt.Sprintln("/key/swarm/psk/1.0.0/")
+	s += fmt.Sprintln("/base16/")
+	s += fmt.Sprintf("%s", key)
+	psk, err := pnet.DecodeV1PSK(bytes.NewBuffer([]byte(s)))
 
 	if err != nil {
-		panic(fmt.Errorf("IPFSLink - InitClient, could not retrieve Adrresses info from IFPS\nerror: %s", err))
+		panic(err)
+	}
+	host, err := libp2p.New(libp2p.EnableRelay(), libp2p.PrivateNetwork(psk))
+
+	if err != nil {
+		panic(fmt.Errorf("IPFSLink - InitClient, could not Create libP2P host\nerror: %s", err))
 	}
 
 	fmt.Println("Node ID:", host.ID())
@@ -73,7 +85,7 @@ func InitClient(name string, bootstrapPeer string) *Client {
 
 		peerInfo, err := peer.AddrInfoFromP2pAddr(multiaddr.StringCast(bootstrapPeer))
 		if err != nil {
-			panic(fmt.Errorf("IPFSLink - InitClient, could not retrieve Adrresses info from IFPS\nerror: %s", err))
+			panic(fmt.Errorf("IPFSLink - InitClient, could not retrieve Adrresses info from IFPS\nerror: %s\nBootstrapPeer : %s", err, bootstrapPeer))
 		}
 
 		if host.Connect(ctx, *peerInfo); err != nil {
@@ -91,26 +103,27 @@ func InitClient(name string, bootstrapPeer string) *Client {
 	// }
 	dhtMode := dht.Mode(dht.ModeServer)
 
-	dht, err := dht.New(ctx, host, dhtMode,
+	dhtV, err := dht.New(ctx, host, dhtMode,
 		dht.ProtocolPrefix(protocol.ID(DHT_PROTOCOL_ID)),
 		dht.RoutingTableRefreshPeriod(5*time.Second))
+
 	if err != nil {
 		panic(fmt.Errorf("IPFSLink - InitClient, could not create the DHT \nerror: %s", err))
 	}
-	dht.Validator = &CustomValidator{}
+	dhtV.Validator = &CustomValidator{}
 
-	if err := dht.Bootstrap(ctx); err != nil {
+	if err := dhtV.Bootstrap(ctx); err != nil {
 		panic(fmt.Errorf("IPFSLink - InitClient, could not connect to the bootstrap\nerror: %s", err))
 	}
 
 	ps, topic, sub := SetupPubSub(host, ctx, TOPIC_NAME)
-	P2PsetupDiscovery(host, ctx, dht)
+	P2PsetupDiscovery(host, ctx, dhtV)
 
 	return &Client{
 		Ctx:   ctx,
 		Name:  name,
 		Host:  host,
-		Dht:   dht,
+		Dht:   dhtV,
 		Ps:    ps,
 		Topic: topic,
 		Sub:   sub,
@@ -157,6 +170,7 @@ func P2PsetupDiscovery(host host.Host, ctx context.Context, dht *dht.IpfsDHT) {
 			}
 		}
 	}()
+	fmt.Println("Advertising is running now")
 }
 
 /** Setup the PubSub and subscribe to appropriate topic */

@@ -11,5 +11,7 @@ for filename in $inputfolder/*.tar.gz; do
     echo "$savingfolder/$EXTENSION"
     echo "filename: $filename"
     mkdir "$savingfolder/$EXTENSION"
-    tar -xf $filename -C $savingfolder/$EXTENSION > /dev/null 
+    tar -xf $filename -C $savingfolder/$EXTENSION > /dev/null
 done
+
+mv $inputfolder/*.netlog  $savingfolder

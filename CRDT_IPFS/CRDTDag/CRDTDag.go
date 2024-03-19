@@ -4,19 +4,92 @@ import (
 	CRDT "IPFS_CRDT/Crdt"
 	IPFSLink "IPFS_CRDT/ipfsLink"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"strconv"
 	"time"
 
+	IpfsLink "IPFS_CRDT/ipfsLink"
+
 	"github.com/ipfs/go-cid"
 	files "github.com/ipfs/go-ipfs-files"
 	"github.com/ipfs/interface-go-ipfs-core/path"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+
+	"golang.org/x/sync/semaphore"
 )
+
+/*
+ *
+ *
+ *
+ *
+ * Encryption and decryption function
+ * Taken from :
+ * https://www.golinuxcloud.com/golang-encrypt-decrypt/
+ *
+ *
+ */
+func encrypt(keyString string, stringToEncrypt string) (encryptedString string) {
+	// convert key to bytes
+	key, _ := hex.DecodeString(keyString)
+	plaintext := []byte(stringToEncrypt)
+
+	//Create a new Cipher Block from the key
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// The IV needs to be unique, but not secure. Therefore it's common to
+	// include it at the beginning of the ciphertext.
+	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		panic(err)
+	}
+
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], plaintext)
+
+	// convert to base64
+	return base64.URLEncoding.EncodeToString(ciphertext)
+}
+
+// decrypt from base64 to decrypted string
+func decrypt(keyString string, stringToDecrypt string) string {
+	key, _ := hex.DecodeString(keyString)
+	ciphertext, _ := base64.URLEncoding.DecodeString(stringToDecrypt)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(fmt.Errorf("Couldn't Create a Cipher !!!\nError: %s\n", err))
+	}
+
+	// The IV needs to be unique, but not secure. Therefore it's common to
+	// include it at the beginning of the ciphertext.
+	if len(ciphertext) < aes.BlockSize {
+		panic(fmt.Errorf("ciphertext too short, here is the Key :%s\n", keyString))
+	}
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+
+	stream := cipher.NewCFBDecrypter(block, iv)
+
+	// XORKeyStream can work in-place if the two arguments are the same.
+	stream.XORKeyStream(ciphertext, ciphertext)
+
+	return fmt.Sprintf("%s", ciphertext)
+}
 
 ///==============================================================
 /// CRDTDag definitions
@@ -25,7 +98,7 @@ import (
 type CRDTDag interface {
 	Lookup_ToSpecifyType() *CRDT.CRDT
 	SendRemoteUpdates()
-	Merge(cid EncodedStr)
+	Merge(cid []EncodedStr) []string
 	GetSys() *IPFSLink.IpfsLink
 	GetCRDTManager() *CRDTManager
 }
@@ -38,18 +111,26 @@ type CRDTManager struct {
 	checkfile                 string
 	SubscribedFile            string
 	sign                      string
+	Key                       string
 	nodesToAdd_Key            []EncodedStr
 	nodesToAdd_value          []*CRDTDagNodeInterface
 	nbLineAlreadyWritten      int
 	nextNodeName              int
+	nextNodeNameBis           int
 	Sys                       *IPFSLink.IpfsLink
 	retrieveMode              bool
+	measurement               bool
+	SemaphoreRootFolderWrite  semaphore.Weighted
 }
 
 func (self *CRDTManager) GetSys() *IPFSLink.IpfsLink {
 	return self.Sys
 }
-func Create_CRDTManager(s *IPFSLink.IpfsLink, storage string, bootStrapPeer string) CRDTManager {
+func Create_CRDTManager(s *IPFSLink.IpfsLink, storage string, bootStrapPeer string, key string, measurement bool) CRDTManager {
+	inkey := ""
+	if key != "" {
+		inkey = hex.EncodeToString([]byte(key))
+	}
 	crdt := CRDTManager{
 		Root_nodes:                make([]EncodedStr, 0),
 		nodesId:                   make([]([]byte), 0),
@@ -59,15 +140,19 @@ func Create_CRDTManager(s *IPFSLink.IpfsLink, storage string, bootStrapPeer stri
 		checkfile:                 "",
 		sign:                      "",
 		pubsubTopic:               "",
+		Key:                       inkey,
 		nodesToAdd_Key:            make([]EncodedStr, 0),
 		nodesToAdd_value:          make([]*CRDTDagNodeInterface, 0),
 		nbLineAlreadyWritten:      0,
 		nextNodeName:              0,
+		nextNodeNameBis:           0,
 		Sys:                       s,
 		retrieveMode:              true,
+		measurement:               measurement,
+		SemaphoreRootFolderWrite:  *semaphore.NewWeighted(1),
 	}
 	fmt.Println("storage : ", crdt.Nodes_storage_enplacement)
-	crdt.SubscribedFile = crdt.NextFileName()
+	crdt.SubscribedFile = crdt.nextFileName2()
 	if _, err := os.Stat(crdt.SubscribedFile); !errors.Is(err, os.ErrNotExist) {
 		os.Remove(crdt.SubscribedFile)
 	}
@@ -98,17 +183,119 @@ func (self CRDTManager) EncodeCid(s path.Resolved) EncodedStr {
 	x := EncodedStr{Str: b}
 	return x
 }
-func (self *CRDTManager) GetNodeFromEncodedCid(s EncodedStr) (files.Node, error) {
-	cid := cid.Cid{}
-	err := json.Unmarshal(s.Str, &cid)
-	if err != nil {
-		panic(fmt.Errorf("Couldn't unMarshall the path, byte :%s \nerror : %s", s.Str, err))
+func (self *CRDTManager) GetNodeFromEncodedCid(stringIn []EncodedStr) ([]string, error) {
+	ti := time.Now()
+	CidsBytes := make([][]byte, len(stringIn))
+
+	for index, s := range stringIn {
+		cid := cid.Cid{}
+		err := json.Unmarshal(s.Str, &cid)
+		if err != nil {
+			panic(fmt.Errorf("Couldn't unMarshall the path, byte :%s \nerror : %s", s.Str, err))
+		}
+		CidsBytes[index] = cid.Bytes()
 	}
-	fil, err := IPFSLink.GetIPFS(self.Sys, cid.Bytes())
+
+	fils, err := IPFSLink.GetIPFS(self.Sys, CidsBytes)
 	if err != nil {
 		panic(fmt.Errorf("issue retrieving the IPFS Node :%s", err))
 	}
-	return fil, err
+	filees_ret := make([]string, 0)
+	timeDownload := 0
+	if len(fils) > 0 {
+		timeDownload = int(time.Since(ti).Nanoseconds()) / len(fils)
+	}
+	for index, fil := range fils {
+		ti := time.Now()
+		if err != nil {
+			panic(fmt.Errorf("could not retrieve the node %s , error :%s", stringIn[index].Str, err))
+		}
+		fstr := self.nextFileName2()
+		err = os.Remove(fstr) // In cas the file where already existing ( which should never be the case)
+		// if errors.Is(err, os.ErrNotExist) {
+		// 	continue
+		// }
+
+		filees_ret = append(filees_ret, fstr)
+
+		// Wrtie the Datadownloaded directly from IFPS
+		files.WriteTo(fil, fstr)
+
+		err = fil.Close()
+		if err != nil {
+			panic(fmt.Errorf("MERGE : Couldn't Close the file\n Error %s", err))
+		}
+
+		// If data has been encoded, We decode it here : \/
+		time_Retrieve := timeDownload + int(time.Since(ti).Nanoseconds())
+		ti = time.Now()
+		if self.Key != "" {
+			dataEncoded, err := os.ReadFile(fstr)
+			if err != nil {
+				panic(fmt.Errorf("error, could not read data to decrypt it\nError: %s", err))
+			}
+			dataClear := decrypt(self.Key, string(dataEncoded))
+
+			os.Remove(fstr)
+			if _, err := os.Stat(fstr); !errors.Is(err, os.ErrNotExist) {
+				os.Remove(fstr)
+			}
+			fil, err := os.OpenFile(fstr, os.O_CREATE|os.O_WRONLY, 0755)
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not open the sub file to write encoded data\nError: %s", err))
+			}
+			_, err = fil.Write([]byte(dataClear))
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not write the sub file to write encoded data\nError: %s", err))
+			}
+			err = fil.Close()
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not close the sub file to write encoded data \nError: %s", err))
+			}
+		}
+		time_decrypt := time.Since(ti).Nanoseconds()
+
+		// Measurement matters bellow
+		if self.measurement {
+			fstrBis := fstr + ".timeRetrieve"
+			if _, err := os.Stat(fstrBis); !errors.Is(err, os.ErrNotExist) {
+				os.Remove(fstrBis)
+			}
+			fil, err := os.OpenFile(fstrBis, os.O_CREATE|os.O_WRONLY, 0755)
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not open the time file to write encoded data\nError: %s", err))
+			}
+			_, err = fil.Write([]byte(strconv.Itoa(time_Retrieve)))
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not write the time file to write encoded data\nError: %s", err))
+			}
+			err = fil.Close()
+			if err != nil {
+				panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not close the time file to write encoded data \nError: %s", err))
+			}
+			if self.Key != "" {
+				fstrBis = fstr + ".timeDecrypt"
+				if _, err := os.Stat(fstrBis); !errors.Is(err, os.ErrNotExist) {
+					os.Remove(fstrBis)
+				}
+				fil, err = os.OpenFile(fstrBis, os.O_CREATE|os.O_WRONLY, 0755)
+				if err != nil {
+					panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not open the time file to write encoded data\nError: %s", err))
+				}
+				_, err = fil.Write([]byte(strconv.Itoa(int(time_decrypt))))
+				if err != nil {
+					panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not write the time file to write encoded data\nError: %s", err))
+				}
+				err = fil.Close()
+				if err != nil {
+					panic(fmt.Errorf("Error RemoteAddNodeSupde - , Could not close the time file to write encoded data \nError: %s", err))
+				}
+			}
+		}
+
+	}
+
+	return filees_ret, nil
 }
 
 // / @brief Creation of a new empty CRDT Counter in the Operation-based principle
@@ -117,7 +304,7 @@ func (self *CRDTManager) GetNodeFromEncodedCid(s EncodedStr) (files.Node, error)
 func (self *CRDTManager) InitCRDTManager(folderNodeStorage string, s *IPFSLink.IpfsLink, signature int) {
 
 	self.Nodes_storage_enplacement = folderNodeStorage
-	self.checkfile = self.NextFileName()
+	self.checkfile = self.nextFileName2()
 	self.Sys = s
 	self.retrieveMode = true
 	// self.sign = self.Sys.Hst. Sys HgetID() + "_" + std::to_string(signature)
@@ -126,8 +313,8 @@ func (self *CRDTManager) InitCRDTManager(folderNodeStorage string, s *IPFSLink.I
 	self.SubscribedFile = folderNodeStorage + "/" + self.pubsubTopic + self.sign + ".data"
 	//self.Sys should be subscribed by default
 	self.nbLineAlreadyWritten = 0
-
 }
+
 func (self *CRDTManager) NextFileName() string {
 	remove_to_save_space := true
 	if remove_to_save_space {
@@ -147,6 +334,27 @@ func (self *CRDTManager) NextFileName() string {
 	self.nextNodeName += 1
 	return res
 }
+
+func (self *CRDTManager) nextFileName2() string {
+	remove_to_save_space := true
+	if remove_to_save_space {
+
+		files, err := ioutil.ReadDir(self.Nodes_storage_enplacement)
+		if err != nil {
+			panic(fmt.Errorf("UpdateRootNodeFolder could not open folder\nError: %s", err))
+		}
+
+		for _, file := range files {
+			if !file.IsDir() {
+				os.Remove(file.Name())
+			}
+		}
+	}
+	res := self.Nodes_storage_enplacement + "/node" + strconv.Itoa(self.nextNodeNameBis)
+	self.nextNodeNameBis += 1
+	return res
+}
+
 func (self *CRDTManager) NextRemoteFileName() string {
 
 	res := self.Nodes_storage_enplacement + "/remote/" + strconv.Itoa(self.nextNodeName)
@@ -163,9 +371,32 @@ func (self *CRDTManager) IsKnown(bytes []byte) bool {
 	return false
 }
 
-func (self *CRDTManager) UpdateRootNodeFolder() {
+func (self *CRDTManager) getSema() {
+	t := time.Now()
+	err := self.SemaphoreRootFolderWrite.Acquire(self.Sys.Ctx, 1)
+	for err != nil && time.Since(t) < 10*time.Second {
+		time.Sleep(10 * time.Microsecond)
+		err = self.SemaphoreRootFolderWrite.Acquire(self.Sys.Ctx, 1)
+	}
 
+	if err != nil {
+		panic(fmt.Errorf("Semaphore of RootFolder locked !!!!\n Cannot acquire it\n"))
+	}
+}
+
+func (self *CRDTManager) returnSema() {
+	self.SemaphoreRootFolderWrite.Release(1)
+
+}
+func (self *CRDTManager) UpdateRootNodeFolder() {
+	// Get the semaphore "Permission" to modify the Root Node FOlder (In case another files wants so)
+	self.getSema()
 	files, err := ioutil.ReadDir(self.Nodes_storage_enplacement + "/rootNode/")
+	t := time.Now()
+	for (err != nil) && (time.Since(t) < 500*time.Millisecond) {
+		time.Sleep(time.Millisecond)
+		files, err = ioutil.ReadDir(self.Nodes_storage_enplacement + "/rootNode/")
+	}
 	if err != nil {
 		panic(fmt.Errorf("UpdateRootNodeFolder could not open folder\nError: %s", err))
 	}
@@ -173,25 +404,50 @@ func (self *CRDTManager) UpdateRootNodeFolder() {
 	for _, file := range files {
 		if file.Size() > 0 {
 			fil, err := os.Open(self.Nodes_storage_enplacement + "/rootNode/" + file.Name())
+			t = time.Now()
+			for (err != nil) && (time.Since(t) < 500*time.Millisecond) {
+				time.Sleep(time.Millisecond)
+				fil, err = os.Open(self.Nodes_storage_enplacement + "/rootNode/" + file.Name())
+			}
 			if err != nil {
-				panic(fmt.Errorf("UPDATE - 1 could Not Open RootNode to update rootnodefolder\nerror: %s", err))
+				panic(fmt.Errorf("UPDATE - 1 could Not Open RootNode %s to update rootnodefolder\nerror: %s", file.Name(), err))
 			}
 			stat, err := fil.Stat()
+			t = time.Now()
+			for (err != nil) && (time.Since(t) < 500*time.Millisecond) {
+				time.Sleep(time.Millisecond)
+				stat, err = fil.Stat()
+			}
 			if err != nil {
 				panic(fmt.Errorf("UPDATE - error in UpdateRootNode, Could not get stat the sub file\nError: %s", err))
 			}
 			bytesread := make([]byte, stat.Size())
 			_, err = fil.Read(bytesread)
+			t = time.Now()
+			for (err != nil) && (time.Since(t) < 500*time.Millisecond) {
+				time.Sleep(time.Millisecond)
+				_, err = fil.Read(bytesread)
+			}
 			if err != nil {
 				panic(fmt.Errorf("UPDATE - error in UpdateRootNode, Could not read the sub file\nError: %s", err))
 			}
 			err = fil.Close()
+			t = time.Now()
+			for (err != nil) && (time.Since(t) < 500*time.Millisecond) {
+				time.Sleep(time.Millisecond)
+				err = fil.Close()
+			}
 			if err != nil {
 				panic(fmt.Errorf("UPDATE - error in UpdateRootNode, Could not close the sub file\nError: %s", err))
 			}
 			if self.IsKnown(bytesread) {
-				// separate in 2 folder would be more efficient i think (root note remote and root nodes)
 				err = os.Remove(self.Nodes_storage_enplacement + "/rootNode/" + file.Name())
+
+				t = time.Now()
+				for (err != nil) && (time.Since(t) < 1000*time.Millisecond) {
+					time.Sleep(time.Millisecond)
+					err = os.Remove(self.Nodes_storage_enplacement + "/rootNode/" + file.Name())
+				}
 				if err != nil {
 					panic(fmt.Errorf("UPDATE -error in UpdateRootNodeFolder, Could not remove the known file\nError: %s", err))
 				}
@@ -216,100 +472,54 @@ func (self *CRDTManager) UpdateRootNodeFolder() {
 		}
 	}
 
+	// Release the Semaphore so others can work
+	self.returnSema()
 }
 
-func sendRootNodes(ps *pubsub.PubSub, topic *pubsub.Topic, RootNodeFolder string) {
-	files, err := ioutil.ReadDir(RootNodeFolder)
-	if err != nil {
-		panic(fmt.Errorf("sendRootNodes - Checkupdate could not open folder\nerror: %s", err))
-	}
+// func sendRootNodes(ps *pubsub.PubSub, topic *pubsub.Topic, RootNodeFolder string) {
+// 	files, err := ioutil.ReadDir(RootNodeFolder)
+// 	if err != nil {
+// 		panic(fmt.Errorf("sendRootNodes - Checkupdate could not open folder\nerror: %s", err))
+// 	}
 
-	for _, file := range files {
+// 	for _, file := range files {
 
-		fil, err := os.OpenFile(RootNodeFolder+"/remote/"+file.Name(), os.O_RDONLY, os.ModeAppend)
-		if err != nil {
-			panic(fmt.Errorf("error in sendRootNodes, Could not open the sub file\nError: %s", err))
-		}
-		stat, err := fil.Stat()
-		if err != nil {
-			panic(fmt.Errorf("error in sendRootNodes, Could not get stat the sub file\nError: %s", err))
-		}
-		bytesread := make([]byte, stat.Size())
-		_, err = fil.Read(bytesread)
-		if err != nil {
-			panic(fmt.Errorf("error in sendRootNodes, Could not read the sub file\nError: %s", err))
-		}
-		err = fil.Close()
-		if err != nil {
-			panic(fmt.Errorf("error in sendRootNodes, Could not close the sub file\nError: %s", err))
-		}
-		err = os.Remove(RootNodeFolder + file.Name())
-		if err != nil {
-			panic(fmt.Errorf("error in sendRootNodes, Could not remove the sub file\nError: %s", err))
-		}
-		ps.Publish(topic.String(), bytesread)
-	}
-	ps.Publish(topic.String(), []byte("EOF"))
-}
+// 		fil, err := os.OpenFile(RootNodeFolder+"/remote/"+file.Name(), os.O_RDONLY, os.ModeAppend)
+// 		if err != nil {
+// 			"golang.org/x/sync/semaphore"
+// 			panic(fmt.Errorf("error in sendRootNodes, Could not open the sub file\nError: %s", err))
+// 		}
+// 		stat, err := fil.Stat()
+// 		if err != nil {
+// 			panic(fmt.Errorf("error in sendRootNodes, Could not get stat the sub file\nError: %s", err))
+// 		}
+// 		bytesread := make([]byte, stat.Size())
+// 		_, err = fil.Read(bytesread)
+// 		if err != nil {
+// 			panic(fmt.Errorf("error in sendRootNodes, Could not read the sub file\nError: %s", err))
+// 		}
+// 		err = fil.Close()
+// 		if err != nil {
+// 			panic(fmt.Errorf("error in sendRootNodes, Could not close the sub file\nError: %s", err))
+// 		}
+// 		err = os.Remove(RootNodeFolder + file.Name())
+// 		if err != nil {
+// 			panic(fmt.Errorf("error in sendRootNodes, Could not remove the sub file\nError: %s", err))
+// 		}
+// 		ps.Publish(topic.String(), bytesread)
+// 	}
+// 	ps.Publish(topic.String(), []byte("EOF"))
+// }
 
-func (self *CRDTManager) ManageRootNodesConnexion(bootstrapPeer string, NodeFolder string) {
-	if bootstrapPeer == "" {
-		ps2, topic2, sub2 := IPFSLink.SetupPubSub(self.GetSys().Cr.Host, self.GetSys().Cr.Ctx, self.GetSys().Cr.Topic.String()+"_NewConnexions")
-		go func() {
-			for {
-				msg, err := sub2.Next(self.GetSys().Cr.Ctx)
-				if err != nil {
-					panic(fmt.Errorf("could not read next message on bootstrap peer\nerror: %s", err))
-				}
-				if msg.GetFrom() != self.GetSys().Cr.Host.ID() {
-					sendRootNodes(ps2, topic2, NodeFolder)
-				}
-			}
-		}()
-	} else {
-		ps2, topic2, sub2 := IPFSLink.SetupPubSub(self.GetSys().Cr.Host, self.GetSys().Cr.Ctx, self.GetSys().Cr.Topic.String()+"_NewConnexions")
-		err := ps2.Publish(topic2.String(), []byte("I need the root nodes"))
-		if err != nil {
-			panic(fmt.Errorf("Could not publish in newConnexion\nError: %s", err))
-		}
-		go func() {
-			i := 0
-			msg, err := sub2.Next(self.GetSys().Cr.Ctx)
-			if err != nil {
-				panic(fmt.Errorf("error in newconnexion pubsub.senxt\nError: %s", err))
-			}
-			for string(msg.Data) != "EOF" {
-				if msg.GetFrom() != self.GetSys().Cr.Host.ID() {
-					fil, err := os.OpenFile(NodeFolder+fmt.Sprintf("/rootNode%d", i), os.O_CREATE|os.O_WRONLY, 0755)
-
-					if err != nil {
-						panic(fmt.Errorf("could not read next message on bootstrap peer\nerror: %s", err))
-					}
-					_, err = fil.Write(msg.GetData())
-					if err != nil {
-						panic(fmt.Errorf("could not write new message from bootstrap peer\nerror: %s", err))
-					}
-					err = fil.Close()
-					if err != nil {
-						panic(fmt.Errorf("could not close writen file from bootstrap peer\nerror: %s", err))
-					}
-				}
-			}
-			fmt.Println("CANCELLING CONNEXION, I GOT ALL INTERESTING ROOT NODES")
-			sub2.Cancel()
-
-		}()
-	}
-}
 func (self *CRDTManager) AddRoot_node(nodeId EncodedStr, node *CRDTDagNodeInterface) {
-
+	self.getSema()
 	self.Root_nodes = append(self.Root_nodes, nodeId)
+	self.returnSema()
 	self.UpdateRootNodeFolder()
-
 }
 
 func (self *CRDTManager) RemoveRoot_node(nodeId EncodedStr) {
-
+	self.getSema()
 	i := -1
 	for x := range self.Root_nodes {
 		if string(self.Root_nodes[x].Str) == string(nodeId.Str) {
@@ -321,6 +531,7 @@ func (self *CRDTManager) RemoveRoot_node(nodeId EncodedStr) {
 		self.Root_nodes[i] = self.Root_nodes[len(self.Root_nodes)-1]
 		self.Root_nodes = self.Root_nodes[:len(self.Root_nodes)-1]
 	}
+	self.returnSema()
 	self.UpdateRootNodeFolder()
 }
 
@@ -343,32 +554,29 @@ func (self *CRDTManager) AddNode(node EncodedStr, d *CRDTDagNodeInterface) {
 // // TODO Check this !!!
 func (self *CRDTManager) RemoteAddNodeSuper(cID EncodedStr, newnode *CRDTDagNodeInterface) {
 
+	toDl := make([]EncodedStr, 0)
 	fmt.Println("=======\nRemote add note\n=======\nPeer:", self.GetSys().Cr.Name, "\nEvent:", (*(*newnode).GetEvent()).ToString(), "\nDirect Dependency:", (*newnode).GetDirect_dependency())
 	if self.retrieveMode {
-		newNodeFile := ""
+		// newNodeFile := ""
 
 		for node := range (*newnode).GetDirect_dependency() {
 			if !self.IsKnown((*newnode).GetDirect_dependency()[node].Str) {
-				newNodeFile = self.NextFileName()
-				if _, err := os.Stat(newNodeFile); !errors.Is(err, os.ErrNotExist) {
-					os.Remove(newNodeFile)
-				}
-				fil, err := self.GetNodeFromEncodedCid((*newnode).GetDirect_dependency()[node])
-				if err != nil {
-					panic(fmt.Errorf("Remote add failed because %s is malformed\nError: %s", (*newnode).GetDirect_dependency()[node], err))
-				}
-				files.WriteTo(fil, newNodeFile)
-				//Copy of newnode ( to have the type)
-				(*newnode).ToFile("/tmp/1")
-				var nn *CRDTDagNodeInterface = (*newnode).CreateEmptyNode()
-				if err != nil {
-					panic(fmt.Errorf("RemoteAddNodeSuper - DeepCopy failed on newnode\nError: %s", err))
-				}
-
-				(*nn).FromFile(newNodeFile)
-
-				self.RemoteAddNodeSuper((*newnode).GetDirect_dependency()[node], nn)
+				toDl = append(toDl, (*newnode).GetDirect_dependency()[node])
 			}
+		}
+
+		fils, err := self.GetNodeFromEncodedCid(toDl)
+
+		for index := range toDl {
+			fil := fils[index]
+			var nn *CRDTDagNodeInterface = (*newnode).CreateEmptyNode()
+			if err != nil {
+				panic(fmt.Errorf("RemoteAddNodeSuper - DeepCopy failed on newnode\nError: %s", err))
+			}
+
+			(*nn).FromFile(fil)
+
+			self.RemoteAddNodeSuper(toDl[index], nn)
 		}
 		self.AddNode(cID, newnode)
 	} else {
@@ -443,12 +651,40 @@ func (self *CRDTManager) RemoteAddNodeSuper(cID EncodedStr, newnode *CRDTDagNode
 
 	}
 
+	self.UpdateRootNodeFolder()
+
+}
+func (self *CRDTManager) AddToIPFS(ipfs *IpfsLink.IpfsLink, message []byte, args ...*int) (path.Resolved, error) {
+	ti := time.Now()
+	if self.Key != "" {
+		message = []byte(encrypt(self.Key, string(message)))
+	}
+	time_Encrypt := int(time.Since(ti).Nanoseconds()) // Wrtie this encrypt time in optionnall results, if there are some
+	if len(args) > 0 {
+		*args[0] = time_Encrypt
+	}
+	path, err := IpfsLink.AddIPFS(ipfs, message)
+	if err != nil {
+		panic(fmt.Errorf("CRDTSetOpBasedDag Increment, could not add the file to IFPS\nerror: %s", err))
+	}
+	return path, err
 }
 
 func (self *CRDTManager) SendRemoteUpdates() {
 
-	for x := range self.Root_nodes {
-		IPFSLink.PubIPFS(self.Sys, self.Root_nodes[x].Str)
+	// Lock the data so we can read it with no modification
+	self.getSema()
+	x := make([]([]byte), len(self.Root_nodes))
+	for i := range self.Root_nodes {
+		x[i] = self.Root_nodes[i].Str
+	}
+
+	self.returnSema()
+
+	// Publish with IPFS the state we read after releasing the semaphore,
+	// Like so we the rest of the algorithm isn't locked for a long time (time to send)
+	for i := range x {
+		IPFSLink.PubIPFS(self.Sys, x[i])
 	}
 }
 

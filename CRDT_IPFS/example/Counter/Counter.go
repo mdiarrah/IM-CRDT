@@ -11,8 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	files "github.com/ipfs/go-ipfs-files"
+	// files "github.com/ipfs/go-ipfs-files"
 )
 
 // =======================================================================================
@@ -206,29 +205,34 @@ func (self *CRDTCounterOpBasedDag) GetCRDTManager() *CRDTDag.CRDTManager {
 
 	return &self.dag
 }
-func (self *CRDTCounterOpBasedDag) Merge(cid CRDTDag.EncodedStr) {
-	find := false
-	for x := range self.dag.GetAllNodes() {
-		if string(self.dag.GetAllNodes()[x]) == string(cid.Str) {
-			find = true
-			break
+func (self *CRDTCounterOpBasedDag) Merge(cids []CRDTDag.EncodedStr) []string {
+	//TODO Manage concurrency
+	for _, cid := range cids {
+		find := false
+		for x := range self.dag.GetAllNodes() {
+			if string(self.dag.GetAllNodes()[x]) == string(cid.Str) {
+				find = true
+				break
+			}
 		}
-	}
-	if !find {
-		fil, err := self.dag.GetNodeFromEncodedCid(cid)
-		if err != nil {
-			panic(fmt.Errorf("could not retrieve the node %s , error :%s", cid.Str, err))
-		}
-		fstr := self.dag.NextFileName()
-		if _, err := os.Stat(fstr); !errors.Is(err, os.ErrNotExist) {
-			os.Remove(fstr)
-		}
-		files.WriteTo(fil, fstr)
-		n := CreateDagNode(INCREMENT, "")
-		n.FromFile(fstr)
+		if !find {
+			// TODO HERE !!
+			// fils, err := self.dag.GetNodeFromEncodedCid(append(make([]CRDTDag.EncodedStr, 0), cid))
+			// if err != nil {
+			// 	panic(fmt.Errorf("could not retrieve the node %s , error :%s", cid.Str, err))
+			// }
+			fstr := self.dag.NextFileName()
+			if _, err := os.Stat(fstr); !errors.Is(err, os.ErrNotExist) {
+				os.Remove(fstr)
+			}
+			// files.WriteTo(fils[0], fstr)
+			n := CreateDagNode(INCREMENT, "")
+			n.FromFile(fstr)
 
-		self.remoteAddNode(cid, n)
+			self.remoteAddNode(cid, n)
+		}
 	}
+	return nil
 }
 func (self *CRDTCounterOpBasedDag) remoteAddNode(cID CRDTDag.EncodedStr, newnode CRDTCounterOpBasedDagNode) {
 	var pl CRDTDag.CRDTDagNodeInterface = &newnode
@@ -296,8 +300,8 @@ func (self *CRDTCounterOpBasedDag) Decrement() {
 	self.SendRemoteUpdates()
 }
 
-func Create_CRDTCounterOpBasedDag(sys *IpfsLink.IpfsLink, storage_emplacement string, bootStrapPeer string) CRDTCounterOpBasedDag {
-	man := CRDTDag.Create_CRDTManager(sys, storage_emplacement, bootStrapPeer)
+func Create_CRDTCounterOpBasedDag(sys *IpfsLink.IpfsLink, storage_emplacement string, bootStrapPeer string, key string, measurement bool) CRDTCounterOpBasedDag {
+	man := CRDTDag.Create_CRDTManager(sys, storage_emplacement, bootStrapPeer, key, measurement)
 	crdtCounter := CRDTCounterOpBasedDag{dag: man}
 
 	var pl CRDTDag.CRDTDag = &crdtCounter
@@ -342,7 +346,7 @@ func (self *CRDTCounterOpBasedDag) CheckUpdate() {
 	if err != nil {
 		panic(fmt.Errorf("CheckUpdate - Checkupdate could not open folder\nerror: %s", err))
 	}
-
+	to_add := make([]CRDTDag.EncodedStr, 0)
 	for _, file := range files {
 
 		fil, err := os.OpenFile(self.GetDag().Nodes_storage_enplacement+"/remote/"+file.Name(), os.O_RDONLY, os.ModeAppend)
@@ -369,8 +373,9 @@ func (self *CRDTCounterOpBasedDag) CheckUpdate() {
 		if err != nil || errors.Is(err, os.ErrNotExist) {
 			panic(fmt.Errorf("error in checkupdate, Could not remove the sub file\nError: %s", err))
 		}
-		self.Merge(CRDTDag.EncodedStr{Str: bytesread})
+		to_add = append(to_add, CRDTDag.EncodedStr{Str: bytesread})
 	}
+	self.Merge(to_add)
 
 	self.GetDag().UpdateRootNodeFolder()
 }
@@ -381,6 +386,8 @@ func (self *CRDTCounterOpBasedDag) CheckRootNodes() {
 	if err != nil {
 		panic(fmt.Errorf("UpdateRootNodeFolder could not open folder\nError: %s", err))
 	}
+
+	to_add := make([]CRDTDag.EncodedStr, 0)
 
 	for _, file := range files {
 		fil, err := os.Open(self.GetDag().Nodes_storage_enplacement + "/rootNode/" + file.Name())
@@ -402,8 +409,9 @@ func (self *CRDTCounterOpBasedDag) CheckRootNodes() {
 		}
 		if !self.GetDag().IsKnown(bytesread) {
 			// separate in 2 folder would be more efficient i think (root note remote and root nodes)
-			self.Merge(CRDTDag.EncodedStr{Str: bytesread})
+			to_add = append(to_add, CRDTDag.EncodedStr{Str: bytesread})
 		}
 	}
 
+	self.Merge(to_add)
 }

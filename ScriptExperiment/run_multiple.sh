@@ -9,10 +9,11 @@ fileNODE=$1
 
 
 
-ARRAY_Repetition=( 2 ) # 4 5 )
-ARRAY_NbPeers=( 50 ) # 2 5 10 20
-ARRAY_UpdatesNb=( 10  ) #  100 1000
-ARRAY_NbPeers_Updating=( 20 ) # 1 2
+ARRAY_Repetition=( 1 ) # 4 5 )
+ARRAY_NbPeers=( 2 3 4 5 ) # 30 50
+ARRAY_UpdatesNb=( 3 5 10 ) #  10 100 
+ARRAY_NbPeers_Updating=( 1 2 3 4 5 ) # 30 50
+
 
 rm advancement
 
@@ -56,7 +57,7 @@ done
 
 
 
-Rscript analyseCSV.R $(($nbpeers-1)) "$folder"  ${save[@]}
+# Rscript analyseCSV.R $(($nbpeers-1)) "$folder"  ${save[@]}
 
 
 fi
