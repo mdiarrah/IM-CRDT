@@ -17,7 +17,7 @@ sleep 300s
 if [ $NumberUpdates -le 10 ]
 then
 echo "letting the algorithm run for 70s"
-sleep $(($numberUpdates + 60))s
+sleep $(($numberUpdates + 100))s
 fi
 if [ $NumberUpdates -eq 100 ]
 then

@@ -10,9 +10,9 @@ fileNODE=$1
 
 
 ARRAY_Repetition=( 1 ) # 4 5 )
-ARRAY_NbPeers=( 2 3 4 5 ) # 30 50
-ARRAY_UpdatesNb=( 3 5 10 ) #  10 100 
-ARRAY_NbPeers_Updating=( 1 2 3 4 5 ) # 30 50
+ARRAY_NbPeers=( 20 ) # 30 50
+ARRAY_UpdatesNb=( 10 100 1000 ) #  10 100 
+ARRAY_NbPeers_Updating=( 1 5 10 20 ) # 30 50
 
 
 rm advancement
