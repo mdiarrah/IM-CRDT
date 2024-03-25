@@ -2,26 +2,34 @@ package IpfsLink
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
+	iface "github.com/ipfs/boxo/coreiface"
 	"github.com/ipfs/go-cid"
 	files "github.com/ipfs/go-ipfs-files"
 
+	//"github.com/labstack/gommon/log"
+
 	//formatIPFS "github.com/ipfs/go-ipld-format"
-	icore "github.com/ipfs/interface-go-ipfs-core"
+	//icore "github.com/ipfs/interface-go-ipfs-core"
+	"github.com/ipfs/go-log/v2"
 	icorepath "github.com/ipfs/interface-go-ipfs-core/path"
 	"github.com/ipfs/kubo/config"
 	"github.com/ipfs/kubo/core"
 	"github.com/ipfs/kubo/core/bootstrap"
 	"github.com/ipfs/kubo/core/coreapi"
+	"github.com/ipfs/kubo/core/node/libp2p"
 	libp2pIFPS "github.com/ipfs/kubo/core/node/libp2p"
 	"github.com/ipfs/kubo/plugin/loader"
 	"github.com/ipfs/kubo/repo/fsrepo"
@@ -81,7 +89,7 @@ func setupDiscovery(h host.Host) error {
 type IpfsLink struct {
 	Cancel          context.CancelFunc
 	Ctx             context.Context
-	IpfsCore        icore.CoreAPI
+	IpfsCore        iface.CoreAPI
 	IpfsNode        *core.IpfsNode
 	Topics          []*pubsub.Topic
 	Hst             host.Host
@@ -95,7 +103,7 @@ func InitNode(peerName string, bootstrapPeer string, ipfsBootstrap []byte) (*Ipf
 
 	// Spawn a local peer using a temporary path, for testing purposes
 	var idBootstrap peer.AddrInfo
-	var ipfsA icore.CoreAPI
+	var ipfsA iface.CoreAPI
 	var nodeA *core.IpfsNode
 	var err error
 
@@ -223,7 +231,7 @@ func createNode(ctx context.Context, repoPath string) (*core.IpfsNode, error) {
 }
 
 // Spawns a node to be used just for this run (i.e. creates a tmp repo)
-func spawnEphemeral(ctx context.Context, btstrap *peer.AddrInfo) (icore.CoreAPI, *core.IpfsNode, error) {
+func spawnEphemeral(ctx context.Context, btstrap *peer.AddrInfo) (iface.CoreAPI, *core.IpfsNode, error) {
 	var onceErr error
 	loadPluginsOnce.Do(func() {
 		onceErr = setupPlugins("")
@@ -407,4 +415,169 @@ func GetIPFS(ipfs *IpfsLink, cids [][]byte) ([]files.Node, error) {
 
 func PubIPFS(ipfs *IpfsLink, msg []byte) {
 	ipfs.Cr.Publish(msg)
+}
+
+// ////////////// mdiarra addons /////////////////////
+const MyRepositoryPath = "demo"
+const PeerLocalInfoFile = "peer_info.json"
+const PORT = 0
+
+var IpfsCore iface.CoreAPI = nil
+var IpfsNode *core.IpfsNode
+
+var LoopBackAddresses = []string{
+	"/ip4/127.0.0.1/ipcidr/8",
+	"/ip6/::1/ipcidr/128",
+}
+
+type MultiAddressesJson struct {
+	PeerID      string   `json:"peer_id"`
+	AddressList []string `json:"listened_addresses"`
+}
+
+var logger = log.Logger("IPFS_CRDT")
+
+func CreateRepoAndConfig(BootstrapMultiAddrList []string) (string, error) {
+
+	log.SetAllLoggers(log.LevelDebug)
+	log.SetLogLevel("IPFS_CRDT", "debug")
+
+	err := os.MkdirAll(MyRepositoryPath, os.ModePerm)
+	if err != nil {
+		panic(err)
+	}
+
+	repoConfiguration, err := config.Init(io.Discard, 2048)
+	if err != nil {
+		panic(err)
+	}
+
+	repoConfiguration.Bootstrap = BootstrapMultiAddrList
+	bootstrap.DefaultBootstrapConfig = bootstrap.BootstrapConfig{
+		MinPeerThreshold:        0,
+		Period:                  10 * time.Second,
+		ConnectionTimeout:       (10 * time.Second) / 3, // Period / 3
+		BackupBootstrapInterval: 1 * time.Hour,
+	}
+
+	repoConfiguration.Discovery.MDNS.Enabled = false
+	repoConfiguration.AutoNAT = config.AutoNATConfig{
+		ServiceMode: config.AutoNATServiceEnabled,
+	}
+
+	repoConfiguration.Swarm = config.SwarmConfig{
+		AddrFilters: LoopBackAddresses,
+		RelayService: config.RelayService{
+			Enabled: config.True,
+		},
+	}
+	repoConfiguration.Addresses = config.Addresses{
+		Swarm: []string{
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", PORT)},
+		NoAnnounce: LoopBackAddresses,
+	}
+	repoConfiguration.Datastore = config.DefaultDatastoreConfig()
+	dataStoreFilePath := filepath.Join(MyRepositoryPath, "datastore_spec")
+	datastoreContent := map[string]interface{}{
+		"mounts": []interface{}{
+			map[string]interface{}{
+				"mountpoint": "/blocks",
+				"path":       "blocks",
+				"shardFunc":  "/repo/flatfs/shard/v1/next-to-last/2",
+				"type":       "flatfs",
+			},
+			map[string]interface{}{
+				"mountpoint": "/",
+				"path":       "datastore",
+				"type":       "levelds",
+			},
+		},
+		"type": "mount",
+	}
+
+	datastoreContentBytes, err := json.Marshal(datastoreContent)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(dataStoreFilePath, []byte(datastoreContentBytes), 0644); err != nil {
+		panic(err)
+	}
+
+	myRepositoryVersion := []byte("14")
+	if err = os.WriteFile(filepath.Join(MyRepositoryPath, "version"), myRepositoryVersion, 0644); err != nil {
+		panic(err)
+	}
+
+	plugins, err := loader.NewPluginLoader(MyRepositoryPath)
+	if err != nil {
+		panic(fmt.Errorf("error loading plugins: %s", err))
+	}
+
+	if err := plugins.Initialize(); err != nil {
+		panic(fmt.Errorf("error initializing plugins: %s", err))
+	}
+
+	if err := plugins.Inject(); err != nil {
+		panic(fmt.Errorf("error initializing plugins: %s", err))
+	}
+	err = fsrepo.Init(MyRepositoryPath, repoConfiguration)
+
+	return MyRepositoryPath, err
+}
+
+func CreateAndStartIpfsNode(BootstrapMultiAddrList []string) error {
+
+	myContext := context.Background()
+	myIpfsRepo, err := fsrepo.Open(MyRepositoryPath)
+	if err != nil {
+		panic(err)
+	}
+
+	myIpfsNodeOptions := &core.BuildCfg{
+		Online:    true,
+		Routing:   libp2p.DHTOption,
+		Repo:      myIpfsRepo,
+		Permanent: true,
+	}
+
+	node, err := core.NewNode(myContext, myIpfsNodeOptions)
+	if err != nil {
+		panic(err)
+	}
+	IpfsNode = node
+	CoreApi, err := coreapi.NewCoreAPI(IpfsNode)
+	if err != nil {
+		panic(err)
+	}
+	IpfsCore = CoreApi
+	// Get peerID from IPFS Key
+	ipfsKey, err := IpfsCore.Key().Self(myContext)
+	if err != nil {
+		panic(err)
+	}
+	peerID := ipfsKey.ID().String()
+
+	announcedAddressesList, err := IpfsCore.Swarm().LocalAddrs(myContext)
+	if err != nil {
+		panic(err)
+	}
+
+	// Store the announced addresses
+	myPeerLocalInfo := MultiAddressesJson{
+		PeerID:      peerID,
+		AddressList: []string{},
+	}
+	for _, addr := range announcedAddressesList {
+		myPeerLocalInfo.AddressList = append(myPeerLocalInfo.AddressList, addr.String()+"/p2p/"+peerID)
+	}
+
+	myPeerlocalInfoBytes, _ := json.Marshal(&myPeerLocalInfo)
+	err = ioutil.WriteFile(path.Join(MyRepositoryPath, PeerLocalInfoFile), myPeerlocalInfoBytes, 0644)
+	if err != nil {
+		panic(err)
+	}
+	logger.Infof("I'm listening on: %v", myPeerLocalInfo.AddressList)
+	logger.Infof("My Peer ID is: %s", peerID)
+	return err
+
 }

@@ -3,139 +3,22 @@ package main
 import (
 	"IPFS_CRDT/CRDTDag"
 	"IPFS_CRDT/Payload"
-	Tests "IPFS_CRDT/example/tests"
 	IPFSLink "IPFS_CRDT/ipfsLink"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strconv"
 	"sync"
+
+	"github.com/ipfs/go-log/v2"
 
 	// "time"
 
 	files "github.com/ipfs/go-ipfs-files"
 	// "github.com/pkg/profile"
 )
-
-// func testIPFSLink() {
-
-// 	fmt.Println("-- Getting an IPFS node running -- ")
-
-// 	ipfs1, err := IPFSLink.InitNode("peeerName ", "")
-
-// 	fmt.Println("-- have an IPFS node running , now adding a file-- ")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to intantiate an IPFS Daemon: %s", err))
-// 	}
-
-// 	ipfsPath, err := IPFSLink.AddIPFS(ipfs1, []byte("i'm connected to IPFS yahooo!!!\n"))
-
-// 	fmt.Println("-- added an IPFS file now create another node -- ")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to add file to IPFS %s", err))
-// 	}
-// 	time.Sleep(20 * time.Second)
-// 	ipfs2, err := IPFSLink.InitNode("peerName2", ipfs1.Cr.Host.Addrs()[0].String()+"/p2p/"+ipfs1.Cr.Host.ID().String())
-// 	fmt.Println("-- added a node, now get a file -- ")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to intantiate a second IPFS Daemon: %s", err))
-// 	}
-// 	fmt.Println("encoded CID :", string(ipfsPath.Cid().Bytes()), "vs CID", ipfsPath.Cid().String())
-// 	fil, err := IPFSLink.GetIPFS(ipfs2, ipfsPath.Cid().Bytes())
-
-// 	go func() {
-// 		for {
-// 			msg, err := ipfs1.Cr.Sub.Next(ipfs1.Cr.Ctx)
-// 			if err != nil {
-// 				fmt.Println("\x1b[31m"+"Pub sub returned error, Aborting:", err, "\x1b[0m")
-// 				break
-// 			} else if msg.ReceivedFrom != ipfs1.Cr.Host.ID() {
-// 				fmt.Println("Received message from", msg.ReceivedFrom,
-// 					"data:", string(msg.Data))
-
-// 				fmt.Println()
-// 			} else {
-// 				fmt.Println("Received message from myself :", msg.ReceivedFrom,
-// 					"data:", string(msg.Data))
-// 			}
-// 		}
-// 	}()
-
-// 	go func() {
-// 		for {
-// 			msg, err := ipfs2.Cr.Sub.Next(ipfs2.Cr.Ctx)
-// 			if err != nil {
-// 				fmt.Println("\x1b[31m"+"Pub sub returned error, Aborting:", err, "\x1b[0m")
-// 				break
-// 			} else if msg.ReceivedFrom != ipfs2.Cr.Host.ID() {
-// 				fmt.Println("Received message from", msg.ReceivedFrom,
-// 					"data:", string(msg.Data))
-
-// 				fmt.Println()
-// 			} else {
-// 				fmt.Println("Received message from myself :", msg.ReceivedFrom,
-// 					"data:", string(msg.Data))
-// 			}
-// 		}
-// 	}()
-
-// 	fmt.Println("-- done-- ")
-
-// 	err = files.WriteTo(fil, "./file.data")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("could not write out the fetched CID: %s", err))
-// 	}
-// 	//
-// 	// "github.com/libp2p/go-libp2p-core/peer"
-
-// 	fmt.Println("out - size : ", len(ipfs1.Topics))
-// 	fmt.Println("out - size2 : ", len(ipfs2.Topics))
-// 	fmt.Println("list peers1 : ", ipfs1.Cr.Ps.ListPeers(ipfs1.Cr.Sub.Topic())) //.ListPeers("bonjour"))
-// 	fmt.Println("list peers2 : ", ipfs2.Cr.Ps.ListPeers(ipfs2.Cr.Sub.Topic()))
-// 	//.ListPeers("bonjour"))
-
-// 	time.Sleep(2 * time.Second)
-// 	IPFSLink.PubIPFS(ipfs1, []byte("I'm connected"))
-// 	time.Sleep(2 * time.Second)
-// 	IPFSLink.PubIPFS(ipfs2, []byte("I'm connected too"))
-// 	time.Sleep(20 * time.Second)
-// }
-
-// func testIPFSLink2() {
-
-// 	fmt.Println("-- Getting an IPFS node running -- ")
-
-// 	ipfs1, err := IPFSLink.InitNode("peeerName ", "")
-
-// 	fmt.Println("-- have an IPFS node running , now adding a file-- ")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to intantiate an IPFS Daemon: %s", err))
-// 	}
-
-// 	ipfsPath, err := IPFSLink.AddIPFS(ipfs1, []byte("i'm connected to IPFS yahooo!!!\n"))
-
-// 	fmt.Println("-- added an IPFS file now create another node -- ")
-
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to add file to IPFS %s", err))
-// 	}
-// 	time.Sleep(20 * time.Second)
-// 	bootstrapPeer := ipfs1.Cr.Host.Addrs()[0].String() + "/p2p/" + ipfs1.Cr.Host.ID().String()
-// 	ipfs2, err := IPFSLink.InitNode("peerName2", bootstrapPeer)
-// 	fmt.Println("-- added a node, now get a file -- ")
-// 	man1 := CRDTDag.Create_CRDTManager(ipfs1, ".", "")
-// 	man2 := CRDTDag.Create_CRDTManager(ipfs2, ".", bootstrapPeer)
-// 	if err != nil {
-// 		panic(fmt.Errorf("failed to intantiate a second IPFS Daemon: %s", err))
-// 	}
-// 	fil, err := man2.GetNodeFromEncodedCid(man1.EncodeCid(ipfsPath))
-// 	files.WriteTo(fil, "file1.data")
-// }
 
 type PayloadExample struct {
 	X int
@@ -176,75 +59,46 @@ func testCRDTDag() {
 
 var mu sync.Mutex
 
+var logger = log.Logger("IPFS_CRDT")
+
 func main() {
-
-	// Tests.RemoteTestSet()n
-
-	peerName := flag.String("name", "FIRST", "name/identity of the current node")
-	mode := flag.String("mode", "", "mode of the current application")
-	updatesNB := flag.Int("updatesNB", 1000, "Number of updates")
-	updating := flag.Bool("updating", false, "do I update the data")
-	measurement := flag.Bool("TimeMeasurement", true, "do I Measure the different timefor each CID, adds files continainning these")
-	ntpServ := flag.String("NTPS", "0.europe.pool.ntp.org", "Available NTP server for time measures")
-	encode := flag.String("encode", "", "Data encription key")
-	bootstrapPeer := flag.String("ni", "", "Client bootstrap for pubsub")
-	IPFSbootstrap := flag.String("IPFSBootstrap", "", "IPFS bootstrap peer to have a private network")
-
-	_ = measurement
-	_ = updating
-
+	log.SetAllLoggers(log.LevelDebug)
+	log.SetLogLevel("IPFS_CRDT", "debug")
+	isBootstrap := flag.Bool("bootstrap", false, "flag to indicate whether its is a bootstrap node")
+	bootstrapPath := flag.String("path", "", "Bootstrap peer json file")
 	flag.Parse()
-	if *mode == "BootStrap" {
-		fmt.Println("bootstrap peer :", *bootstrapPeer)
-		// if err := os.Mkdir(*peerName, os.ModePerm); err != nil {
-		// 	panic(err)
-		// }
-		if err := os.Mkdir(*peerName, os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		if err := os.Mkdir(*peerName+"/remote", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		if err := os.Mkdir(*peerName+"/rootNode", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		if err := os.Mkdir(*peerName+"/time", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		Tests.Peer1Concu(*peerName, *updatesNB, *ntpServ, *encode, *measurement) // ------------- MANAGE CONCURENCY !!!
-		// Tests.Peer1IPFS(*peerName, *updatesNB, *ntpServ) // ------------- NO CONCURENCY, ONLY IPFS ALONE !!!
-		// Tests.Peer1(*peerName, *updatesNB, *ntpServ) // ------------- NO CONCURENCY, CRDT + IPFS  !!!
-	} else if *mode == "update" {
 
-		fmt.Println("bootstrap peer :", *bootstrapPeer)
-		// if err := os.Mkdir(*peerName, os.ModePerm); err != nil {
-		// 	panic(err)
-		// }
-		if err := os.Mkdir(*peerName+"/remote", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		if err := os.Mkdir(*peerName+"/rootNode", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-		if err := os.Mkdir(*peerName+"/time", os.ModePerm); err != nil {
-			fmt.Print(err, "\n")
-		}
-
-		// defer profile.Start(profile.CPUProfile).Stop()
-		// if false {
-		// 	Tests.Peer2Concu(*peerName, *bootstrapPeer, *updatesNB)
-		// 	fmt.Println("test2")
-		// }
-
-		if *updating {
-			fmt.Println("UPDATING IN FACT")
-			Tests.Peer2ConcuUpdate(*peerName, *bootstrapPeer, *IPFSbootstrap, *updatesNB, *ntpServ, *encode, *measurement) // ------------- MANAGE CONCURENCY !!!
-		} else {
-			fmt.Println("NOT UPDATING FIOU")
-			Tests.Peer2Concu(*peerName, *bootstrapPeer, *IPFSbootstrap, *updatesNB, *ntpServ, *encode, *measurement) // ------------- MANAGE CONCURENCY !!!
-		}
-
-		// Tests.Peer2IPFS(*peerName, *bootstrapPeer, *updatesNB, *ntpServ) // ------------- NO CONCURENCY, ONLY IPFS ALONE !!!
-		// Tests.Peer2(*peerName, *bootstrapPeer, *updatesNB, *ntpServ) // ------------- NO CONCURENCY, CRDT + IPFS  !!!
+	bootstrapConfig := IPFSLink.MultiAddressesJson{
+		AddressList: make([]string, 0),
 	}
+
+	if !*isBootstrap {
+		if _, err := os.Stat(*bootstrapPath); err == nil {
+			jsonData, err := ioutil.ReadFile(*bootstrapPath)
+			if err != nil {
+				logger.Errorf("error loading bootstrap file, %v", err)
+				return
+			}
+			err = json.Unmarshal(jsonData, &bootstrapConfig)
+			if err != nil {
+				logger.Errorf("error Unmarshalling bootstrap file, %v", err)
+				return
+			}
+		} else {
+			logger.Errorf("error, bootstrap file '%s' file doesn't exist %v", *bootstrapPath, err)
+			return
+		}
+	}
+
+	fmt.Println("bootstrap peer :", bootstrapConfig.AddressList)
+	if _, err := IPFSLink.CreateRepoAndConfig(bootstrapConfig.AddressList); err != nil {
+		panic(err)
+	}
+
+	if err := IPFSLink.CreateAndStartIpfsNode(bootstrapConfig.AddressList); err != nil {
+		panic(err)
+	}
+
+	select {}
+
 }
